@@ -1,0 +1,11 @@
+---
+- name: Reload sshd
+  service:
+    name: sshd
+    state: reloaded
+
+- name: Reload Docker
+  systemd:
+    name: docker
+    state: restarted
+    daemon_reload: yes

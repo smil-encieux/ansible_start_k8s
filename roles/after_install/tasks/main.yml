@@ -1,0 +1,50 @@
+---
+
+- name: Extract Helm
+  unarchive:
+    src: "{{ share_dir }}/helm.tar.gz"
+    dest: /tmp
+    remote_src: yes
+
+# 注意，这里需要根据实际情况修改
+- name: Move Helm binary
+  copy:
+    src: /tmp/linux-arm64/helm
+    dest: /usr/local/bin/helm
+    mode: '0755'
+    remote_src: yes
+
+# - name: Add Traefik Helm repo
+#   command: helm repo add traefik https://traefik.github.io/charts
+
+# - name: Update Helm repos
+#   command: helm repo update
+
+- name: Copy traefik-values.yaml file
+  copy:
+    src: traefik-values.yaml
+    dest: /tmp/traefik-values.yaml
+    mode: '0644'
+
+
+- name: Install Traefik
+  command: >
+    helm install traefik "{{ share_dir }}/local-repo/traefik-28.1.0.tgz"
+    --values /tmp/traefik-values.yaml
+    --namespace traefik
+    --create-namespace
+
+- name: Add NFS Subdir External Provisioner Helm repo
+  command: helm repo add nfs-subdir-external-provisioner https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner/
+
+- name: Install NFS Subdir External Provisioner
+  command: >
+    helm install nfs-subdir-external-provisioner nfs-subdir-external-provisioner/nfs-subdir-external-provisioner
+    --version 4.0.18
+    --set nfs.server={{ master_ip }}
+    --set nfs.path=/srv/nfs/kubedata
+    --set storageClass.name=managed-nfs-storage
+    --set image.repository=k8s.m.daocloud.io/sig-storage/nfs-subdir-external-provisioner
+    --set image.tag=v4.0.2
+    --namespace nfs-storage
+    --create-namespace

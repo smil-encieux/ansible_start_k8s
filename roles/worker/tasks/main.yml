@@ -1,0 +1,34 @@
+---
+- name: Install NFS client
+  apt:
+    name: nfs-common
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Check if node is already joined
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+- name: Display join status
+  debug:
+    msg: "Node is {{ 'already' if kubelet_conf.stat.exists else 'not yet' }} joined to the cluster"
+
+- name: Copy the join command to server location
+  copy: 
+    src: "{{ share_dir }}/join-commands/join-command"
+    dest: /tmp/join-command.sh
+    mode: 0777
+    remote_src: yes
+  when: not kubelet_conf.stat.exists
+
+- name: Join the node to cluster
+  command: sh /tmp/join-command.sh
+  when: not kubelet_conf.stat.exists
+
+- name: Remove the join command file
+  file:
+    path: /tmp/join-command.sh
+    state: absent
+  when: not kubelet_conf.stat.exists

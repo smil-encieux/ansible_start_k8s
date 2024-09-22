@@ -1,0 +1,119 @@
+---
+- name: Pull required images
+  command: >
+    kubeadm config images pull
+    --cri-socket unix:///var/run/cri-dockerd.sock
+    --image-repository {{ image_repository }}
+    --kubernetes-version v{{ kubernetes_version.split('-')[0] }}
+
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_initialized
+
+- name: Initialize Kubernetes cluster
+  command: >
+    kubeadm init
+    --cri-socket unix:///var/run/cri-dockerd.sock
+    --image-repository {{ image_repository }}
+    --kubernetes-version v{{ kubernetes_version.split('-')[0] }}
+    --pod-network-cidr {{ pod_network_cidr }}
+    --service-cidr {{ service_cidr }}
+    --upload-certs
+    --apiserver-advertise-address {{ master_ip }}
+    --control-plane-endpoint {{ master_ip }}
+  register: kubeadm_init
+  when: not k8s_initialized.stat.exists
+
+- name: Display kubeadm init output
+  debug:
+    var: kubeadm_init.stdout_lines
+  when: kubeadm_init.changed
+
+- name: Create .kube directory
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0755'
+
+- name: Copy admin.conf to root's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: yes
+
+- name: Check if Flannel is already deployed
+  command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -n kube-flannel -l app=flannel
+  register: flannel_status
+  ignore_errors: yes
+  changed_when: false
+
+- name: Deploy Flannel network
+  command: kubectl --kubeconfig=/etc/kubernetes/admin.conf create -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+  when: flannel_status.rc != 0 or 'Running' not in flannel_status.stdout
+
+- name: Generate join command
+  command: kubeadm token create --print-join-command
+  register: join_command_raw
+  when: k8s_initialized.stat.exists
+
+- name: Extract join command components
+  set_fact:
+    join_ip_port: "{{ join_command_raw.stdout | regex_search('(\\d+\\.\\d+\\.\\d+\\.\\d+:\\d+)') }}"
+    join_token: "{{ join_command_raw.stdout | regex_search('--token\\s+(\\S+)') | regex_replace('--token\\s+', '') }}"
+    join_discovery_token_hash: "{{ join_command_raw.stdout | regex_search('sha256:[a-f0-9]+') }}"
+  when: join_command_raw is defined
+
+- name: Display extracted join command components
+  debug:
+    msg:
+      - "Join IP:Port: {{ join_ip_port }}"
+      - "Join Token: {{ join_token }}"
+      - "Join Discovery Token Hash: {{ join_discovery_token_hash }}"
+  when: join_command_raw is defined
+
+- name: Construct full join command
+  set_fact:
+    full_join_command: >-
+      kubeadm join {{ join_ip_port }}
+      --token {{ join_token }}
+      --discovery-token-ca-cert-hash {{ join_discovery_token_hash }}
+      --cri-socket unix:///var/run/cri-dockerd.sock
+  when: join_command_raw is defined
+
+# 保存在共享目录中
+- name: Ensure directory for join command exists in shared folder
+  file:
+    path: "{{ share_dir }}/join-commands"
+    state: directory
+    mode: '0755'
+
+- name: Copy join command to shared folder
+  copy:
+    content: "{{ full_join_command }}"
+    dest: "{{ share_dir }}/join-commands/join-command"
+
+- name: Install NFS server
+  apt:
+    name: nfs-kernel-server
+    state: present
+
+- name: Create NFS export directory
+  file:
+    path: "{{ nfs_path }}"
+    state: directory
+    mode: '0755'
+    owner: nobody
+    group: nogroup
+
+- name: Configure NFS exports
+  lineinfile:
+    path: /etc/exports
+    line: "{{ nfs_path }} *(rw,sync,no_subtree_check)"
+    create: yes
+
+- name: Enable and start NFS server
+  systemd:
+    name: nfs-kernel-server
+    state: started
+    enabled: yes

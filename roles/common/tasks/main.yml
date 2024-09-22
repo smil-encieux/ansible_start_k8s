@@ -1,0 +1,183 @@
+---
+- name: Disable swap
+  command: swapoff -a
+  changed_when: false
+
+- name: Remove swap entry from /etc/fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+    line: '# \1'
+    backrefs: yes
+
+- name: Disable UFW
+  systemd:
+    name: ufw
+    state: stopped
+    enabled: no
+
+- name: Load kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Add kernel settings
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+  loop:
+    - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+    - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+    - { name: 'net.ipv4.ip_forward', value: '1' }
+
+- name: Install required packages
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+    update_cache: yes
+
+- name: Create Docker GPG key directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Add Docker GPG apt Key
+  shell: |
+    curl -fsSL http://mirrors.aliyun.com/docker-ce/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
+
+- name: Add Docker Repository
+  shell: |
+    echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] http://mirrors.aliyun.com/docker-ce/linux/ubuntu \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  args:
+    creates: /etc/apt/sources.list.d/docker.list
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install Docker
+  apt:
+    name:
+      - docker-ce={{ docker_version }}
+      - docker-ce-cli={{ docker_version }}
+      - containerd.io
+    state: present
+
+- name: Copy Docker daemon configuration
+  copy:
+    src: daemon.json
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify:
+    - Reload Docker
+
+- name: Ensure Docker service is started and enabled
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+
+# - name: Install cri-dockerd
+#   get_url:
+#     url: "{{ cri_dockerd_url }}"
+#     dest: /tmp/cri-dockerd.tgz
+
+- name: Extract cri-dockerd
+  ansible.builtin.unarchive:
+    src: "{{ share_dir }}/cri-dockerd.tgz"
+    dest: /tmp
+    remote_src: yes
+
+- name: Install cri-dockerd binary
+  copy:
+    src: /tmp/cri-dockerd/cri-dockerd
+    dest: /usr/local/bin/cri-dockerd
+    mode: '0755'
+    remote_src: yes
+
+- name: Copy cri-docker service file
+  copy:
+    src: cri-docker.service
+    dest: /etc/systemd/system/cri-docker.service
+    mode: '0644'
+
+- name: Copy cri-docker socket file
+  copy:
+    src: cri-docker.socket
+    dest: /etc/systemd/system/cri-docker.socket
+    mode: '0644'
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: Enable cri-docker service
+  systemd:
+    name: cri-docker.service
+    enabled: yes
+
+- name: Enable and start cri-docker socket
+  systemd:
+    name: cri-docker.socket
+    enabled: yes
+    state: started
+
+# 安装的是v1.28版本
+- name: Add k8s GPG apt Key
+  shell: |
+    curl -fsSL https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    chmod a+r /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+- name: Add k8s Repository
+  shell: |
+    echo \
+    "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://mirrors.aliyun.com/kubernetes-new/core/stable/v1.28/deb/ /" | \
+    sudo tee /etc/apt/sources.list.d/kubernetes.list > /dev/null
+  args:
+    creates: /etc/apt/sources.list.d/kubernetes.list
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Install Kubernetes components
+  apt:
+    name:
+      - kubelet={{ kubernetes_version }}
+      - kubeadm={{ kubernetes_version }}
+      - kubectl={{ kubernetes_version }}
+    state: present
+    update_cache: yes
+
+- name: Enable ssh password authentication
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PasswordAuthentication'
+    line: 'PasswordAuthentication yes'
+  notify: Reload sshd
+
+- name: Update /etc/hosts file
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ item }}"
+  loop:
+    - "{{ master_ip }} {{ master_hostname }}"
+    - "{{ worker1_ip }} {{ worker1_hostname }}"
+    - "{{ worker2_ip }} {{ worker2_hostname }}"
+    - "{{ haproxy_ip }} {{ haproxy_hostname }}"
